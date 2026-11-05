@@ -1,0 +1,20 @@
+{
+  "name": "straight-face",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A keep-a-straight-face game driven by live camera signals from the Presage SmartSpectra SDK.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "@smartspectra/node-sdk": "3.4.0"
+  },
+  "devDependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "electron": "43.2.0",
+    "esbuild": "^0.25.0"
+  }
+}
