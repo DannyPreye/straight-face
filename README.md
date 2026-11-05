@@ -77,3 +77,7 @@ In a VS Code terminal, clear `ELECTRON_RUN_AS_NODE` first or the app exits immed
 | `src/decks.js` | Prompt packs (original writing) |
 | `src/card.js` | Result card rendering |
 | `build.mjs` | Bundles the renderer and injects the API key from `.env` |
+
+## License
+
+MIT for this project's code. The SmartSpectra SDK is proprietary to Presage and is used under [its own terms](https://physiology.presagetech.com/tos).
