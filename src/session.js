@@ -19,6 +19,8 @@ const { decodeMetrics } = require('@smartspectra/node-sdk/messages');
 // the SDK to read. A webcam frame in an unlit room measured about 7.
 const MIN_BRIGHTNESS = 40;
 const LIGHT_CHECK_MS = 1500;
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1500;
 
 const EXPRESSION_NAMES = {
   1: 'angry', 2: 'contempt', 3: 'disgust', 4: 'fear',
@@ -44,7 +46,7 @@ const ERROR_TITLES = {
   [SmartSpectraErrorCode.kNetworkError]: 'Could not reach Presage. Check your connection.',
   [SmartSpectraErrorCode.kServerError]: 'Presage’s server had a problem. Try again shortly.',
   [SmartSpectraErrorCode.kInputUnavailable]: 'The camera could not be opened.',
-  [SmartSpectraErrorCode.kProcessingFailed]: 'The SDK stopped reading your camera. This can happen when the picture is too dark.',
+  [SmartSpectraErrorCode.kProcessingFailed]: 'The SDK stopped reading your camera. This usually means the connection to Presage dropped, or the picture is too dark.',
   [SmartSpectraErrorCode.kFrameConversionFailed]: 'The SDK could not read your camera’s video format.',
 };
 // Codes where the face can't be read, so a round shouldn't count.
@@ -75,6 +77,7 @@ class Session extends EventTarget {
     this.sampler.height = 36;
     this.samplerCtx = this.sampler.getContext('2d', { willReadFrequently: true });
     this.brightnessHandle = null;
+    this.retries = 0;
     this.reset();
   }
 
@@ -141,20 +144,22 @@ class Session extends EventTarget {
   }
 
   // Returns { ok: true } or { ok: false, reason, title, detail }.
-  async start(video) {
+  // A restart after a dropped connection skips the lighting check.
+  async start(video, { recovering = false } = {}) {
     if (this.sdk) return { ok: true };
     this.video = video;
     this.reset();
-    this.emit('status', { label: 'Checking light', tone: 'busy' });
+    if (!recovering) this.retries = 0;
+    this.emit('status', { label: recovering ? 'Reconnecting' : 'Checking light', tone: 'busy' });
 
-    let light;
+    let light = MIN_BRIGHTNESS;
     try {
-      light = await this.checkLighting();
+      if (!recovering) light = await this.checkLighting();
     } catch (err) {
       this.emit('status', { label: 'Camera off', tone: 'idle' });
       return { ok: false, reason: 'camera', title: 'The camera could not be opened.', detail: err.message };
     }
-    this.lightCheck = light === null ? null : Math.round(light);
+    if (!recovering) this.lightCheck = light === null ? null : Math.round(light);
     if (light === null || light < MIN_BRIGHTNESS) {
       this.emit('status', { label: 'Camera off', tone: 'idle' });
       return {
@@ -198,6 +203,14 @@ class Session extends EventTarget {
     });
     sdk.on('error', (code, message, retryable) => {
       console.error(`SDK error ${code} (${ERROR_NAMES[code]}): ${message}; retryable=${retryable}`);
+      // The SDK fetches models and checks usage with Presage's servers while
+      // it runs, so a network blip can end a session. Reconnect quietly.
+      if (retryable && this.retries < MAX_RETRIES && this.sdk === sdk) {
+        this.retries += 1;
+        this.emit('recovering', { attempt: this.retries, code });
+        this.recover();
+        return;
+      }
       const dark = code === SmartSpectraErrorCode.kProcessingFailed && this.brightness !== null
         ? ` Your picture brightness was ${this.brightness} out of 255; aim for ${MIN_BRIGHTNESS} or more.`
         : '';
@@ -228,6 +241,18 @@ class Session extends EventTarget {
       return { ok: false, reason: 'sdk', title: 'Could not start the SDK.', detail: err.message };
     }
     return { ok: true };
+  }
+
+  async recover() {
+    const video = this.video;
+    await this.stop();
+    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    const res = await this.start(video, { recovering: true });
+    if (res.ok) {
+      this.emit('recovered', {});
+    } else {
+      this.emit('error', { code: null, title: res.title, detail: res.detail });
+    }
   }
 
   watchBrightness() {

@@ -125,6 +125,36 @@ session.addEventListener('error', ({ detail }) => {
   session.stop();
 });
 
+session.addEventListener('recovering', () => {
+  const wasPlaying = ['settle', 'countdown', 'live'].includes(game.phase);
+  clearTimers();
+  $('prompt-card').hidden = true;
+  $('hud-top').hidden = true;
+  if (screen === 'play') {
+    game.phase = 'recovering';
+    overlay({
+      kicker: wasPlaying ? 'Round doesn’t count' : 'Hang on',
+      title: 'Reconnecting…',
+      text: 'The connection to Presage dropped for a moment. This takes a few seconds.',
+    });
+  }
+  $('lab-validation').textContent = 'Connection dropped. Reconnecting…';
+  $('lab-validation').dataset.tone = 'warn';
+});
+
+session.addEventListener('recovered', () => {
+  if (screen === 'play' && game.phase === 'recovering') {
+    game.phase = 'handoff';
+    overlay({
+      kicker: 'Back online',
+      title: playerName(current(), game.turn % players.length),
+      text: 'Ready when you are.',
+      action: { label: 'Start round', run: beginRound },
+    });
+    armIdle();
+  }
+});
+
 session.addEventListener('stopped', () => {
   $('heart-pill').hidden = true;
   $('hud-heart').dataset.beating = 'false';
