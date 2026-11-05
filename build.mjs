@@ -13,7 +13,7 @@ function readEnv(name) {
 }
 
 await build({
-  entryPoints: ['src/signal-check.js'],
+  entryPoints: ['src/app.js'],
   bundle: true,
   outfile: 'dist/renderer.bundle.js',
   platform: 'browser',

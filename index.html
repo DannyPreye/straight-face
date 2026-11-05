@@ -3,27 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self'; font-src 'self'; media-src 'self' blob: mediastream:; worker-src 'self' blob:;">
+        content="default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; worker-src 'self' blob:;">
   <title>Straight Face</title>
   <link rel="stylesheet" href="dist/app.css">
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand">
+      <button type="button" class="brand" id="go-home" aria-label="Straight Face home">
         <svg class="logo" viewBox="0 0 48 48" aria-hidden="true">
           <circle cx="24" cy="24" r="22" class="logo-face"/>
           <circle cx="16.5" cy="20" r="3" class="logo-eye"/>
           <circle cx="31.5" cy="20" r="3" class="logo-eye"/>
           <rect x="14" y="30.5" width="20" height="3.6" rx="1.8" class="logo-mouth"/>
         </svg>
-        <div>
-          <h1>Straight Face</h1>
-          <p class="tagline">Calibration booth</p>
-        </div>
-      </div>
+        <span class="brand-text">
+          <span class="brand-name">Straight Face</span>
+          <span class="tagline" id="tagline">The camera is watching</span>
+        </span>
+      </button>
       <div class="topbar-right">
-        <span id="timer" class="timer" aria-label="Time left in session"></span>
+        <span id="heart-pill" class="pill pill-heart" hidden>
+          <svg class="heart" id="hud-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8.1 3 4.5 6.6 4.5c2.1 0 3.6 1.2 5.4 3.2 1.8-2 3.3-3.2 5.4-3.2 3.6 0 5.7 3.6 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>
+          <span id="hud-bpm"></span>
+        </span>
         <span id="status" class="pill" data-tone="idle">Camera off</span>
       </div>
     </header>
@@ -37,73 +40,178 @@
       <span id="error-detail"></span>
     </div>
 
-    <main class="stage">
-      <section class="booth" aria-label="Camera">
+    <!-- Home -->
+    <main id="screen-home" class="screen">
+      <section class="hero">
+        <p class="kicker">A game for people who think they’re unbreakable</p>
+        <h1>Don’t crack.</h1>
+        <p class="lede">
+          Your webcam reads your face in real time with the Presage SmartSpectra SDK.
+          Smile and you’re out. Blink and you’re out. Pass the laptop and find out who in the room has the best poker face.
+        </p>
+      </section>
+
+      <section class="setup">
+        <fieldset class="modes">
+          <legend>Pick a game</legend>
+          <label class="mode-card">
+            <input type="radio" name="mode" value="straight" checked>
+            <span class="mode-emoji" aria-hidden="true">😐</span>
+            <span class="mode-name">Straight Face</span>
+            <span class="mode-desc">Prompts try to make you smile. Hold out for 45 seconds.</span>
+          </label>
+          <label class="mode-card">
+            <input type="radio" name="mode" value="stare">
+            <span class="mode-emoji" aria-hidden="true">👁️</span>
+            <span class="mode-name">Staring Contest</span>
+            <span class="mode-desc">First blink loses. Last for 60 seconds to be unbreakable.</span>
+          </label>
+        </fieldset>
+
+        <div class="setup-grid">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Players</h2>
+              <button type="button" class="btn btn-small btn-ghost" id="add-player">Add player</button>
+            </div>
+            <ol class="players" id="players"></ol>
+            <p class="note">One face at a time. Players take turns in front of the camera.</p>
+          </div>
+
+          <div class="panel">
+            <h2>Prompts</h2>
+            <div class="packs">
+              <label class="toggle"><input type="checkbox" name="pack" value="general" checked> <span>Everyday absurd</span></label>
+              <label class="toggle"><input type="checkbox" name="pack" value="naija" checked> <span>Naija</span></label>
+            </div>
+            <h2 class="h2-gap">Cracked card</h2>
+            <label class="toggle">
+              <input type="checkbox" id="photo-opt">
+              <span>Put a photo of the moment you crack on your result card</span>
+            </label>
+            <p class="note">
+              Off by default. The photo stays in this window’s memory and is gone when you start the next round
+              or close the app. It’s only saved as a file if you press Save.
+            </p>
+          </div>
+        </div>
+
+        <div class="cta-row">
+          <button type="button" class="btn btn-primary btn-big" id="play">Play</button>
+          <button type="button" class="btn btn-ghost" id="open-lab">Signal lab</button>
+        </div>
+        <p class="consent-line">
+          Pressing Play turns on your camera. Video is processed by the SmartSpectra SDK and nothing is recorded.
+          The camera turns off when you go back home or close the app.
+        </p>
+      </section>
+    </main>
+
+    <!-- Play -->
+    <main id="screen-play" class="screen play" hidden>
+      <section class="stage-col">
         <div class="viewfinder" id="viewfinder" data-live="false">
-          <video id="preview" autoplay muted playsinline></video>
+          <div class="video-slot" id="play-video-slot"></div>
           <span class="corner tl"></span><span class="corner tr"></span>
           <span class="corner bl"></span><span class="corner br"></span>
 
-          <div class="consent" id="consent">
-            <p class="consent-kicker">Before we roll</p>
-            <h2>Can you keep a straight face?</h2>
-            <p>
-              Start turns on your camera so the SmartSpectra SDK can read your expression, blinks and pulse.
-              Nothing is recorded or saved, and the session ends by itself after 3 minutes.
-            </p>
-            <button id="start" type="button" class="btn btn-primary">Turn on camera</button>
+          <div class="hud-top" id="hud-top" hidden>
+            <span class="hud-player" id="hud-player"></span>
+            <span class="hud-timer" id="hud-timer">0.0</span>
           </div>
 
+          <div class="prompt-card" id="prompt-card" hidden aria-live="polite">
+            <span class="prompt-emoji" id="prompt-emoji"></span>
+            <span class="prompt-text" id="prompt-text"></span>
+          </div>
+
+          <div class="overlay" id="overlay">
+            <p class="overlay-kicker" id="overlay-kicker"></p>
+            <h2 class="overlay-title" id="overlay-title"></h2>
+            <p class="overlay-text" id="overlay-text"></p>
+            <button type="button" class="btn btn-primary" id="overlay-action" hidden></button>
+          </div>
+
+          <div class="flash" id="flash"></div>
           <p id="validation" class="hint" hidden></p>
-        </div>
-        <div class="booth-actions">
-          <button id="stop" type="button" class="btn btn-ghost" disabled>Stop camera</button>
         </div>
       </section>
 
-      <section class="panel meter-panel" aria-label="Crack-o-meter">
-        <div class="panel-head">
-          <h2>Crack-o-meter</h2>
-          <span id="top" class="chip">Waiting for a face</span>
+      <aside class="side-col">
+        <section class="panel" id="meter-panel">
+          <div class="panel-head">
+            <h2 id="meter-title">Crack-o-meter</h2>
+            <span id="top" class="chip">Waiting for a face</span>
+          </div>
+          <div class="meter" id="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Smile level">
+            <div class="meter-fill"></div>
+            <div class="meter-mark" aria-hidden="true"></div>
+          </div>
+          <div class="meter-scale" aria-hidden="true">
+            <span>Stone cold</span><span>Wobbling</span><span>Cracked</span>
+          </div>
+          <div class="eyes" id="eyes" hidden aria-hidden="true">
+            <span class="eye"></span><span class="eye"></span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Scoreboard</h2>
+            <span class="chip chip-quiet" id="mode-chip"></span>
+          </div>
+          <ol class="scoreboard" id="scoreboard"></ol>
+        </section>
+
+        <section class="panel result" id="result" hidden>
+          <img id="result-card" alt="Your result card">
+          <p class="result-line" id="result-line"></p>
+          <p class="result-pulse" id="result-pulse" hidden></p>
+          <div class="result-actions">
+            <button type="button" class="btn btn-ghost btn-small" id="save-card">Save card</button>
+          </div>
+        </section>
+
+        <div class="play-actions">
+          <button type="button" class="btn btn-ghost" id="leave-play">Stop and go home</button>
         </div>
-        <div class="meter" id="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Happiness">
-          <div class="meter-fill"></div>
-          <div class="meter-mark" aria-hidden="true"></div>
+      </aside>
+    </main>
+
+    <!-- Signal lab -->
+    <main id="screen-lab" class="screen lab" hidden>
+      <section class="booth">
+        <div class="viewfinder" id="lab-viewfinder" data-live="false">
+          <div class="video-slot" id="lab-video-slot"></div>
+          <span class="corner tl"></span><span class="corner tr"></span>
+          <span class="corner bl"></span><span class="corner br"></span>
+          <div class="overlay" id="lab-overlay">
+            <p class="overlay-kicker">Signal lab</p>
+            <h2 class="overlay-title">See exactly what the SDK sees</h2>
+            <p class="overlay-text">Live readings, warm-up times and a reaction test. The session ends by itself after 3 minutes.</p>
+            <button type="button" class="btn btn-primary" id="lab-start">Turn on camera</button>
+          </div>
+          <p id="lab-validation" class="hint" hidden></p>
         </div>
-        <div class="meter-scale" aria-hidden="true">
-          <span>Stone cold</span><span>Wobbling</span><span>Cracked</span>
+        <div class="booth-actions">
+          <span class="timer" id="lab-timer"></span>
+          <button type="button" class="btn btn-ghost" id="lab-stop" disabled>Stop camera</button>
         </div>
-        <p class="meter-readout"><span id="happy">&mdash;</span><span id="meter-word"></span></p>
       </section>
 
       <section class="panel stats" aria-label="Live signals">
-        <div class="stat">
-          <span class="stat-label">Pulse</span>
-          <span class="stat-value"><svg class="heart" id="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8.1 3 4.5 6.6 4.5c2.1 0 3.6 1.2 5.4 3.2 1.8-2 3.3-3.2 5.4-3.2 3.6 0 5.7 3.6 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg><span id="pulse">&mdash;</span></span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Blinks</span>
-          <span class="stat-value" id="blinks">&mdash;</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Breathing</span>
-          <span class="stat-value" id="breathing">&mdash;</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">HRV (RMSSD)</span>
-          <span class="stat-value" id="hrv">&mdash;</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Talking</span>
-          <span class="stat-value" id="talking">&mdash;</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Face updates</span>
-          <span class="stat-value" id="rate">&mdash;</span>
-        </div>
+        <div class="stat"><span class="stat-label">Smile</span><span class="stat-value" id="lab-happy">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Top expression</span><span class="stat-value" id="lab-top">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Blinks</span><span class="stat-value" id="lab-blinks">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Pulse</span><span class="stat-value" id="lab-pulse">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Breathing</span><span class="stat-value" id="lab-breathing">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">HRV (RMSSD)</span><span class="stat-value" id="lab-hrv">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Talking</span><span class="stat-value" id="lab-talking">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Face updates</span><span class="stat-value" id="lab-rate">&mdash;</span></div>
+        <div class="stat"><span class="stat-label">Brightness</span><span class="stat-value" id="lab-bright">&mdash;</span></div>
       </section>
 
-      <section class="panel reaction" aria-label="Reaction test">
+      <section class="panel reaction">
         <div class="panel-head">
           <h2>Reaction test</h2>
           <span class="chip chip-quiet">5 rounds</span>
@@ -112,18 +220,19 @@
           Hold a neutral face. Press <kbd>Space</kbd> the moment you start to smile, then relax.
           We time how long the SDK takes to notice.
         </p>
-        <ol class="rounds" id="smile-results"></ol>
-        <p id="smile-state" class="reaction-state" aria-live="polite">Turn on the camera to begin.</p>
+        <ol class="rounds" id="lab-rounds"></ol>
+        <p id="lab-smile-state" class="reaction-state" aria-live="polite">Turn on the camera to begin.</p>
       </section>
-    </main>
 
-    <details class="diagnostics">
-      <summary>Diagnostics</summary>
-      <textarea id="report" readonly rows="12" aria-label="Signal check results"></textarea>
-      <button id="copy" type="button" class="btn btn-ghost">Copy results</button>
-    </details>
+      <details class="diagnostics">
+        <summary>Diagnostics</summary>
+        <textarea id="report" readonly rows="12" aria-label="Signal lab results"></textarea>
+        <button id="copy" type="button" class="btn btn-ghost">Copy results</button>
+      </details>
+    </main>
   </div>
 
+  <video id="preview" autoplay muted playsinline></video>
   <script src="dist/renderer.bundle.js"></script>
 </body>
 </html>
