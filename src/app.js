@@ -1,6 +1,6 @@
 'use strict';
 
-const { Session } = require('./session');
+const { Session, MIN_BRIGHTNESS } = require('./session');
 const { makeDeck, makeTauntDeck } = require('./decks');
 const { renderCard } = require('./card');
 const { createPacer, syncScore, drawWave, WAVE_WINDOW_S } = require('./cooldown');
@@ -20,35 +20,77 @@ const BLINK_GRACE_MS = 400;     // ignore a blink already in progress at "Go"
 const PROMPT_EVERY_MS = 6000;
 const TAUNT_EVERY_MS = 5000;
 const IDLE_STOP_MS = 3 * 60 * 1000;
-const MODES = {
-  straight: { label: 'Straight Face', limit: 45, lose: 'cracked' },
-  stare: { label: 'Staring Contest', limit: 60, lose: 'blinked' },
-  cool: { label: 'Cool Down', limit: 90, lose: null },
-};
 const SYNC_EVERY_MS = 1000;
 const SYNC_GRACE_S = 15;        // sync needs 15 s of guide + breath to measure
-
-// Cool Down scores are sync percentages; the other modes are seconds.
-function fmtScore(mode, v) {
-  return mode === 'cool' ? `${Math.round(v)}%` : `${v.toFixed(1)}s`;
-}
+const CHECK_ANYWAY_MS = 20000;  // after this, allow starting with checks pending
 const MAX_PLAYERS = 8;
+
+const MODES = {
+  straight: {
+    label: 'Straight Face',
+    limit: 45,
+    emoji: '😐',
+    how: [
+      'A funny prompt pops up every few seconds.',
+      'If the camera sees you smile, you’re out.',
+      'Last 45 seconds and you’re unbreakable. Longest time wins.',
+    ],
+    packs: true,
+    photo: true,
+  },
+  stare: {
+    label: 'Staring Contest',
+    limit: 60,
+    emoji: '👁️',
+    how: [
+      'Look at the screen with your eyes open.',
+      'The first blink the camera sees ends your round.',
+      'Last 60 seconds and you’re unbreakable. Longest time wins.',
+    ],
+    packs: false,
+    photo: true,
+  },
+  cool: {
+    label: 'Cool Down',
+    limit: 90,
+    emoji: '🧘',
+    how: [
+      'A glowing guide grows as you breathe in and shrinks as you breathe out.',
+      'It starts at your own pace and slowly gets slower.',
+      'Follow it for 90 seconds. Your score is how closely your breath matched it.',
+    ],
+    packs: false,
+    photo: false,
+  },
+};
 const EMOJI = { angry: '😠', contempt: '😏', disgust: '🤢', fear: '😨', happy: '😄', neutral: '😐', sad: '😢', surprise: '😮' };
 
 const $ = (id) => document.getElementById(id);
 const session = new Session({ apiKey: API_KEY, debug: DEBUG });
 const preview = $('preview');
 
+// Cool Down scores are sync percentages; the other modes are seconds.
+function fmtScore(mode, v) {
+  return mode === 'cool' ? `${Math.round(v)}%` : `${v.toFixed(1)}s`;
+}
+
 // ---------------------------------------------------------------- screens
 
-let screen = 'home';
+const STEPS = ['pick', 'setup', 'check', 'play'];
+let screen = 'pick';
 
 function showScreen(name) {
   screen = name;
-  for (const s of ['home', 'play', 'lab']) $(`screen-${s}`).hidden = s !== name;
-  const slot = { play: 'play-video-slot', lab: 'lab-video-slot' }[name];
+  for (const s of [...STEPS, 'lab']) $(`screen-${s}`).hidden = s !== name;
+  const slot = { check: 'check-video-slot', play: 'play-video-slot', lab: 'lab-video-slot' }[name];
   if (slot) $(slot).append(preview);
-  $('tagline').textContent = { home: 'The camera is watching', play: MODES[game.mode]?.label ?? '', lab: 'Signal lab' }[name];
+  const idx = STEPS.indexOf(name);
+  $('stepper').dataset.off = String(idx < 0);
+  for (const li of $('stepper').children) {
+    const i = STEPS.indexOf(li.dataset.step);
+    li.dataset.state = i < idx ? 'done' : i === idx ? 'now' : 'todo';
+    if (i === idx) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current');
+  }
 }
 
 function showError(title, detail) {
@@ -61,23 +103,29 @@ function clearError() {
   $('error').hidden = true;
 }
 
-async function goHome() {
+async function goPick() {
   endRound(null);
   clearTimeout(idleHandle);
+  stopCheck();
   labStopLocal();
   await session.stop();
   revokeCard();
-  showScreen('home');
+  clearError();
+  showScreen('pick');
 }
 
 // ---------------------------------------------------------------- session wiring
 
+let lastValidation = null;
+
 session.addEventListener('status', ({ detail }) => {
   $('status').textContent = detail.label;
   $('status').dataset.tone = detail.tone;
+  check.live = detail.tone === 'live';
 });
 
 session.addEventListener('validation', ({ detail }) => {
+  lastValidation = detail;
   for (const id of ['validation', 'lab-validation']) {
     const el = $(id);
     if (el.textContent !== detail.text) el.textContent = detail.text;
@@ -101,7 +149,6 @@ session.addEventListener('dark', () => {
 
 session.addEventListener('expression', ({ detail }) => {
   setMeter(detail.happy ?? 0);
-  if (detail.top) $('top').textContent = `${EMOJI[detail.top.name] ?? ''} ${detail.top.name}`.trim();
   onGameExpression(detail);
   onLabExpression(detail);
 });
@@ -132,12 +179,12 @@ session.addEventListener('talking', ({ detail }) => {
 session.addEventListener('vitals', ({ detail }) => {
   const { pulse, breathing, hrv } = detail;
   if (pulse) {
-    $('heart-pill').hidden = false;
-    $('hud-bpm').textContent = `${pulse.value.toFixed(0)} bpm`;
+    $('rail-pulse').hidden = false;
+    $('hud-bpm').textContent = `Pulse ${pulse.value.toFixed(0)} bpm`;
     $('hud-heart').style.setProperty('--beat', `${(60 / Math.max(40, pulse.value)).toFixed(2)}s`);
     $('hud-heart').dataset.beating = 'true';
   }
-  onLabVitals(detail, { pulse, breathing, hrv });
+  onLabVitals({ pulse, breathing, hrv });
 });
 
 session.addEventListener('error', ({ detail }) => {
@@ -145,13 +192,13 @@ session.addEventListener('error', ({ detail }) => {
   lab.errors.push(`${detail.title} ${detail.detail}`);
   endRound('error');
   session.stop();
+  if (screen === 'check') checkFailed(detail.title, detail.detail);
 });
 
 session.addEventListener('recovering', () => {
   const wasPlaying = ['settle', 'countdown', 'live'].includes(game.phase);
   clearTimers();
-  $('prompt-card').hidden = true;
-  $('hud-top').hidden = true;
+  hideRoundVisuals();
   if (screen === 'play') {
     game.phase = 'recovering';
     overlay({
@@ -165,41 +212,32 @@ session.addEventListener('recovering', () => {
 });
 
 session.addEventListener('recovered', () => {
-  if (screen === 'play' && game.phase === 'recovering') {
-    game.phase = 'handoff';
-    overlay({
-      kicker: 'Back online',
-      title: playerName(current(), game.turn % players.length),
-      text: 'Ready when you are.',
-      action: { label: 'Start round', run: beginRound },
-    });
-    armIdle();
-  }
+  if (screen === 'play' && game.phase === 'recovering') handoff('Back online.');
 });
 
 session.addEventListener('stopped', () => {
   game.trace = [];
   game.traceShift = null;
-  $('heart-pill').hidden = true;
+  lastValidation = null;
+  check.live = false;
+  $('rail-pulse').hidden = true;
   $('hud-heart').dataset.beating = 'false';
-  $('viewfinder').dataset.live = 'false';
-  $('lab-viewfinder').dataset.live = 'false';
+  for (const id of ['viewfinder', 'check-viewfinder', 'lab-viewfinder']) $(id).dataset.live = 'false';
   for (const id of ['validation', 'lab-validation']) $(id).hidden = true;
 });
 
 session.addEventListener('stream', () => {
-  $('viewfinder').dataset.live = String(screen === 'play');
-  $('lab-viewfinder').dataset.live = String(screen === 'lab');
-  $(screen === 'lab' ? 'lab-validation' : 'validation').hidden = false;
+  const vf = { play: 'viewfinder', check: 'check-viewfinder', lab: 'lab-viewfinder' }[screen];
+  if (vf) $(vf).dataset.live = 'true';
+  $('check-placeholder').hidden = true;
+  if (screen === 'lab') $('lab-validation').hidden = false;
   lab.camera = session.camera;
 });
 
 function setMeter(value) {
   const level = Math.max(0, Math.min(100, value));
-  $('meter').style.setProperty('--level', level.toFixed(1));
-  $('meter').setAttribute('aria-valuenow', level.toFixed(0));
-  const state = level >= CRACK_LEVEL ? 'cracked' : level >= WOBBLE_LEVEL ? 'wobbling' : 'steady';
-  $('meter-panel').dataset.state = state;
+  $('vmeter').style.setProperty('--level', level.toFixed(1));
+  $('stage').dataset.meter = level >= CRACK_LEVEL ? 'cracked' : level >= WOBBLE_LEVEL ? 'wobbling' : 'steady';
 }
 
 function blinkEyes() {
@@ -208,19 +246,35 @@ function blinkEyes() {
   setTimeout(() => { eyes.dataset.blink = 'false'; }, 180);
 }
 
-// ---------------------------------------------------------------- home setup
+// ---------------------------------------------------------------- 1. pick + 2. setup
 
 const players = [];
+
+function chooseMode(mode) {
+  clearError();
+  game.mode = mode;
+  const m = MODES[mode];
+  $('setup-eyebrow').textContent = `How to play`;
+  $('setup-title').textContent = `${m.emoji} ${m.label}`;
+  const how = $('setup-how');
+  how.replaceChildren();
+  for (const line of m.how) {
+    const li = document.createElement('li');
+    li.textContent = line;
+    how.append(li);
+  }
+  $('packs-block').hidden = !m.packs;
+  $('photo-block').hidden = !m.photo;
+  $('extras').hidden = !m.packs && !m.photo;
+  showScreen('setup');
+  $('to-check').focus();
+}
 
 function renderPlayers() {
   const list = $('players');
   list.replaceChildren();
   players.forEach((p, i) => {
     const li = document.createElement('li');
-    const label = document.createElement('label');
-    label.className = 'sr-only';
-    label.htmlFor = `player-${i}`;
-    label.textContent = `Player ${i + 1} name`;
     const input = document.createElement('input');
     input.id = `player-${i}`;
     input.type = 'text';
@@ -233,7 +287,7 @@ function renderPlayers() {
     const num = document.createElement('span');
     num.className = 'player-num';
     num.textContent = String(i + 1);
-    li.append(num, label, input);
+    li.append(num, input);
     if (players.length > 1) {
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -248,9 +302,13 @@ function renderPlayers() {
   $('add-player').disabled = players.length >= MAX_PLAYERS;
 }
 
+function newPlayer() {
+  return { name: '', best: { straight: null, stare: null, cool: null } };
+}
+
 function addPlayer() {
   if (players.length >= MAX_PLAYERS) return;
-  players.push({ name: '', best: { straight: null, stare: null } });
+  players.push(newPlayer());
   renderPlayers();
   $(`player-${players.length - 1}`).focus();
 }
@@ -259,7 +317,94 @@ function playerName(p, i) {
   return p.name.trim() || `Player ${i + 1}`;
 }
 
-// ---------------------------------------------------------------- game
+// ---------------------------------------------------------------- 3. camera check
+
+const check = { timer: 0, since: 0, live: false, failed: false };
+
+function setItem(id, state) {
+  $(id).dataset.state = state;
+}
+
+async function enterCheck() {
+  clearError();
+  showScreen('check');
+  check.failed = false;
+  check.since = performance.now();
+  $('check-retry').hidden = true;
+  $('check-placeholder').hidden = false;
+  $('chk-chest').hidden = game.mode !== 'cool';
+  for (const id of ['chk-signal', 'chk-light', 'chk-face', 'chk-chest']) setItem(id, 'wait');
+  $('start-game').disabled = true;
+  $('start-game').textContent = 'Start the game';
+  $('check-hint').textContent = 'Checking your light…';
+  clearInterval(check.timer);
+  check.timer = setInterval(updateCheck, 300);
+
+  if (!session.running) {
+    const res = await session.start(preview);
+    if (screen !== 'check') return;
+    if (!res.ok) {
+      checkFailed(res.title, res.detail, res.reason);
+      return;
+    }
+  }
+}
+
+function checkFailed(title, detail, reason) {
+  check.failed = true;
+  clearInterval(check.timer);
+  setItem(reason === 'dark' ? 'chk-light' : 'chk-signal', 'bad');
+  $('check-hint').textContent = `${title} ${detail ?? ''}`.trim();
+  $('check-retry').hidden = false;
+  $('start-game').disabled = true;
+}
+
+function stopCheck() {
+  clearInterval(check.timer);
+}
+
+function updateCheck() {
+  if (screen !== 'check' || check.failed) return;
+  const nowMs = performance.now();
+  const results = {};
+
+  results.signal = check.live ? 'ok' : 'wait';
+
+  const b = session.brightness;
+  results.light = b === null ? (session.lightCheck !== null && session.lightCheck >= MIN_BRIGHTNESS && check.live ? 'ok' : 'wait')
+    : b >= MIN_BRIGHTNESS ? 'ok' : 'bad';
+
+  if (!lastValidation) results.face = 'wait';
+  else results.face = !lastValidation.faceLost && session.top ? 'ok' : lastValidation.faceLost ? 'bad' : 'wait';
+
+  if (game.mode === 'cool') {
+    const flowing = game.trace.length > 0 && nowMs / 1000 - game.lastTraceAt < 2;
+    const chestHidden = lastValidation?.name === 'ChestNotVisible';
+    results.chest = chestHidden ? 'bad' : flowing ? 'ok' : 'wait';
+  }
+
+  setItem('chk-signal', results.signal);
+  setItem('chk-light', results.light);
+  setItem('chk-face', results.face);
+  if (results.chest) setItem('chk-chest', results.chest);
+
+  const pending = Object.entries(results).filter(([, s]) => s !== 'ok');
+  const ready = pending.length === 0;
+  const waitedLong = nowMs - check.since > CHECK_ANYWAY_MS;
+
+  const advice = {
+    signal: 'Connecting to Presage…',
+    light: 'Too dark: turn on a lamp in front of you, or face a window.',
+    face: lastValidation?.text ? `Camera says: ${lastValidation.text}` : 'Look at the screen so the camera can find your face.',
+    chest: 'Sit back so your upper chest is in view, and keep the laptop still on a table.',
+  };
+  $('check-hint').textContent = ready ? 'All set. Press Start when you’re ready.' : advice[pending[0][0]];
+
+  $('start-game').disabled = !(ready || (waitedLong && check.live));
+  $('start-game').textContent = ready || !waitedLong ? 'Start the game' : 'Start anyway';
+}
+
+// ---------------------------------------------------------------- 4. game
 
 const game = {
   mode: 'straight',
@@ -302,11 +447,16 @@ function clearTimers() {
   cancelAnimationFrame(game.raf);
 }
 
-function overlay({ kicker = '', title = '', text = '', action = null }) {
+// One overlay on the stage for every between-rounds moment.
+function overlay({ kicker = '', title = '', text = '', action = null, card = null }) {
   $('overlay').hidden = false;
+  $('stage').dataset.overlay = 'true';
   $('overlay-kicker').textContent = kicker;
   $('overlay-title').textContent = title;
   $('overlay-text').textContent = text;
+  $('overlay-card').hidden = !card;
+  if (card) $('overlay-card').src = card;
+  $('save-card').hidden = !card;
   const btn = $('overlay-action');
   btn.hidden = !action;
   if (action) {
@@ -318,6 +468,15 @@ function overlay({ kicker = '', title = '', text = '', action = null }) {
 
 function hideOverlay() {
   $('overlay').hidden = true;
+  $('stage').dataset.overlay = 'false';
+  $('overlay').dataset.count = 'false';
+}
+
+function hideRoundVisuals() {
+  $('prompt-card').hidden = true;
+  $('hud').hidden = true;
+  $('pacer').hidden = true;
+  $('breath-strip').hidden = true;
 }
 
 function current() {
@@ -341,51 +500,38 @@ function renderScoreboard() {
     li.append(name, score);
     list.append(li);
   }
-  $('mode-chip').textContent = MODES[game.mode].label;
 }
 
-async function startPlay() {
+function startPlay() {
+  stopCheck();
   clearError();
-  if (!API_KEY) return;
-  game.mode = document.querySelector('input[name="mode"]:checked').value;
   const packs = [...document.querySelectorAll('input[name="pack"]:checked')].map((el) => el.value);
   game.deck = makeDeck(packs.length ? packs : ['general']);
   game.taunts = makeTauntDeck();
-  game.photo = $('photo-opt').checked;
+  game.photo = MODES[game.mode].photo && $('photo-opt').checked;
   game.turn = 0;
   for (const p of players) p.best = { straight: null, stare: null, cool: null };
 
-  $('meter-panel').hidden = game.mode === 'cool';
-  $('calm-panel').hidden = game.mode !== 'cool';
-  $('meter-title').textContent = game.mode === 'stare' ? 'Eyes' : 'Crack-o-meter';
-  $('meter').hidden = game.mode === 'stare';
-  document.querySelector('.meter-scale').hidden = game.mode === 'stare';
+  $('stage').dataset.mode = game.mode;
+  $('rail-mode').textContent = `${MODES[game.mode].emoji} ${MODES[game.mode].label}`;
+  $('vmeter').hidden = game.mode !== 'straight';
   $('eyes').hidden = game.mode !== 'stare';
-  $('result').hidden = true;
+  $('validation').hidden = false;
   showScreen('play');
-  renderScoreboard();
   handoff();
 }
 
-function handoff() {
+function handoff(kickerOverride) {
   clearTimers();
   game.phase = 'handoff';
-  $('hud-top').hidden = true;
-  $('prompt-card').hidden = true;
+  hideRoundVisuals();
+  revokeCard();
   renderScoreboard();
   const name = playerName(current(), game.turn % players.length);
-  const rules = {
-    stare: 'Keep your eyes open. The first blink ends your round.',
-    straight: 'Prompts will try to make you smile. Keep the Crack-o-meter out of the red.',
-    cool: 'Breathe with the guide for 90 seconds. It starts at your own pace and slows down. Your score is how closely your breath follows it.',
-  }[game.mode];
-  const framing = game.mode === 'cool'
-    ? 'Keep the laptop on a table and sit back so your face and upper chest are in view.'
-    : 'Sit facing the camera with light on your face.';
   overlay({
-    kicker: players.length > 1 ? 'Pass the laptop to' : 'Ready?',
+    kicker: kickerOverride ?? (players.length > 1 ? 'Your turn' : 'Ready?'),
     title: name,
-    text: `${rules} ${framing}`,
+    text: MODES[game.mode].how[1],
     action: { label: session.running ? 'Start round' : 'Turn on camera and start', run: beginRound },
   });
   armIdle();
@@ -394,9 +540,9 @@ function handoff() {
 function armIdle() {
   clearTimeout(idleHandle);
   idleHandle = setTimeout(async () => {
-    if (game.phase !== 'handoff' || !session.running) return;
+    if (!['handoff', 'result'].includes(game.phase) || !session.running) return;
     await session.stop();
-    handoff();
+    handoff('Camera paused');
     $('overlay-text').textContent = 'The camera turned off after 3 idle minutes. Start when you’re ready.';
   }, IDLE_STOP_MS);
 }
@@ -405,9 +551,8 @@ async function beginRound() {
   clearError();
   clearTimeout(idleHandle);
   revokeCard();
-  $('result').hidden = true;
   if (!session.running) {
-    overlay({ kicker: 'One moment', title: 'Checking your light…', text: 'The camera is warming up.' });
+    overlay({ kicker: 'One moment', title: 'Starting the camera…' });
     const res = await session.start(preview);
     if (!res.ok) {
       showError(res.title, res.detail);
@@ -424,13 +569,11 @@ function settle() {
   game.settleSince = 0;
   game.phaseSince = performance.now();
   overlay({
-    kicker: game.mode === 'cool' ? 'Get comfortable' : 'Get your game face on',
-    title: { stare: 'Look at the camera', straight: 'Neutral face, please', cool: 'Just breathe for a moment' }[game.mode],
-    text: game.mode === 'cool'
-      ? 'The round starts once we can see your breathing.'
-      : 'The round starts once we can see you clearly.',
+    kicker: 'Get ready',
+    title: { stare: 'Eyes on the screen', straight: 'Neutral face', cool: 'Breathe normally' }[game.mode],
+    text: 'Starting as soon as the camera can see you.',
   });
-  const check = () => {
+  const step = () => {
     if (game.phase !== 'settle') return;
     const now = performance.now();
     const faceOk = session.top && !game.faceLost;
@@ -447,16 +590,15 @@ function settle() {
       game.settleSince = 0;
     }
     if (now - game.phaseSince > SETTLE_TIMEOUT_MS) {
-      const hint = $('validation').textContent;
       $('overlay-text').textContent = !session.top
-        ? `We can’t read your face yet. ${hint ? `The camera says: “${hint}”` : 'Check your light and framing.'}`
+        ? `We can’t see your face. ${lastValidation?.text ? `Camera says: ${lastValidation.text}` : 'Check your light and framing.'}`
         : game.mode === 'cool'
-          ? 'We can’t see your breathing yet. Sit back so your upper chest is in view, and keep the laptop still.'
+          ? 'We can’t see your breathing. Sit back so your upper chest is in view.'
           : 'Relax your face. Think about tax forms.';
     }
-    game.raf = requestAnimationFrame(check);
+    game.raf = requestAnimationFrame(step);
   };
-  game.raf = requestAnimationFrame(check);
+  game.raf = requestAnimationFrame(step);
 }
 
 function countdown() {
@@ -469,7 +611,7 @@ function countdown() {
       goLive();
       return;
     }
-    overlay({ kicker: { stare: 'Eyes open', straight: 'Straight face', cool: 'Follow the guide' }[game.mode], title: String(n), text: '' });
+    overlay({ kicker: { stare: 'Eyes open', straight: 'Straight face', cool: 'Follow the guide' }[game.mode], title: String(n) });
     $('overlay').dataset.count = 'true';
     n -= 1;
     later(tick, 800);
@@ -479,14 +621,19 @@ function countdown() {
 
 function goLive() {
   clearTimers();
-  $('overlay').dataset.count = 'false';
   hideOverlay();
   game.phase = 'live';
   game.startedAt = performance.now();
   game.crackSince = 0;
   game.pulseStart = session.vitals.pulse?.value ?? null;
-  $('hud-top').hidden = false;
+  $('hud').hidden = false;
   $('hud-player').textContent = playerName(current(), game.turn % players.length);
+
+  const limit = MODES[game.mode].limit;
+  if (game.mode === 'cool') {
+    startCoolDown(limit);
+    return;
+  }
 
   const nextPrompt = () => {
     game.prompt = game.mode === 'stare' ? game.taunts() : game.deck();
@@ -498,14 +645,8 @@ function goLive() {
     void card.offsetWidth;
     card.dataset.anim = 'true';
   };
-  const limit = MODES[game.mode].limit;
-  if (game.mode === 'cool') {
-    startCoolDown(limit);
-    return;
-  }
   if (game.mode === 'stare') {
     game.prompt = null;
-    $('prompt-card').hidden = true;
     game.timers.push(setInterval(nextPrompt, TAUNT_EVERY_MS));
   } else {
     nextPrompt();
@@ -529,8 +670,6 @@ function goLive() {
   game.raf = requestAnimationFrame(frame);
 }
 
-// ---------------------------------------------------------------- cool down
-
 function startCoolDown(limit) {
   const measured = session.vitals.breathing?.value ?? null;
   const pacer = createPacer(measured, limit);
@@ -540,10 +679,11 @@ function startCoolDown(limit) {
   game.breathIn = null;
   game.prompt = null;
   $('pacer').hidden = false;
+  $('breath-strip').hidden = false;
   $('cue-sub').textContent = measured === null
-    ? `Your breathing reading wasn’t ready yet, so the guide starts at ${pacer.start} a minute.`
-    : `Starting at your own pace: ${pacer.start.toFixed(0)} breaths a minute.`;
-  $('sync-value').textContent = 'Measuring…';
+    ? `Starting at ${pacer.start} breaths a minute`
+    : `Starting at your pace: ${pacer.start.toFixed(0)} breaths a minute`;
+  $('sync-value').textContent = '…';
 
   let last = performance.now();
   let lastSync = 0;
@@ -561,7 +701,6 @@ function startCoolDown(limit) {
     }
     if (t > 8) $('cue-sub').textContent = String(Math.ceil(step.leftInPhase));
     $('hud-timer').textContent = Math.max(0, limit - t).toFixed(0);
-    $('guide-pace').textContent = `${pacer.rate.toFixed(1)} /min`;
 
     const nowS = nowMs / 1000;
     game.guide.push({ t: nowS, v: step.level });
@@ -605,31 +744,19 @@ function onGameBlink({ at }) {
   endRound('blinked');
 }
 
-// outcome: null (leaving), 'error', 'void', or a scored result
-// ('cracked' | 'blinked' | 'unbreakable'), which only counts while live.
+// outcome: null (leaving), 'error', 'void', 'nobreath', or a scored result
+// ('cracked' | 'blinked' | 'unbreakable' | 'synced'), which only counts while live.
 function endRound(outcome) {
   if (outcome === 'synced' && !game.syncs.length) outcome = 'nobreath';
   const scored = ['cracked', 'blinked', 'unbreakable', 'synced'].includes(outcome);
   if ((scored || outcome === 'void' || outcome === 'nobreath') && game.phase !== 'live') return;
 
-  const seconds = outcome === 'synced'
+  const score = outcome === 'synced'
     ? game.syncs.reduce((s, v) => s + v, 0) / game.syncs.length
     : scored ? Math.min(MODES[game.mode].limit, (performance.now() - game.startedAt) / 1000) : 0;
   const photo = scored && game.photo ? session.snapshot() : null;
   clearTimers();
-  $('prompt-card').hidden = true;
-  $('hud-top').hidden = true;
-  $('pacer').hidden = true;
-  if (outcome === 'nobreath') {
-    game.phase = 'result';
-    overlay({
-      kicker: 'Round doesn’t count',
-      title: 'We couldn’t see your breathing',
-      text: 'Keep the laptop still on a table and sit back so your upper chest is in view.',
-      action: { label: 'Try again', run: beginRound },
-    });
-    return;
-  }
+  hideRoundVisuals();
 
   if (outcome === null) {
     game.phase = 'idle';
@@ -637,30 +764,33 @@ function endRound(outcome) {
   }
   if (outcome === 'error') {
     game.phase = 'idle';
-    if (screen === 'play') handoff();
+    if (screen === 'play') handoff('Something went wrong');
     return;
   }
   game.phase = 'result';
-  if (outcome === 'void') {
-    $('flash').dataset.on = 'false';
+  if (outcome === 'void' || outcome === 'nobreath') {
     overlay({
       kicker: 'Round doesn’t count',
-      title: 'We lost your face',
-      text: 'Stay in frame, facing the camera. Have another go.',
+      title: outcome === 'void' ? 'We lost your face' : 'We couldn’t see your breathing',
+      text: outcome === 'void'
+        ? 'Stay in frame, facing the screen.'
+        : 'Keep the laptop still on a table and sit back so your upper chest is in view.',
       action: { label: 'Try again', run: beginRound },
     });
+    armIdle();
     return;
   }
-  showResult(outcome, seconds, photo);
+  showResult(outcome, score, photo);
 }
 
-async function showResult(outcome, seconds, photo) {
+async function showResult(outcome, score, photo) {
   const idx = game.turn % players.length;
   const player = current();
   const name = playerName(player, idx);
   const prevBest = player.best[game.mode];
-  const isBest = prevBest === null || seconds > prevBest;
-  if (isBest) player.best[game.mode] = seconds;
+  const isBest = prevBest === null || score > prevBest;
+  if (isBest) player.best[game.mode] = score;
+  renderScoreboard();
 
   const flash = $('flash');
   flash.dataset.tone = outcome;
@@ -669,60 +799,49 @@ async function showResult(outcome, seconds, photo) {
   flash.dataset.on = 'true';
 
   const titles = {
-    cracked: `Cracked at ${seconds.toFixed(1)}s`,
-    blinked: `Blinked at ${seconds.toFixed(1)}s`,
+    cracked: `Cracked at ${score.toFixed(1)}s`,
+    blinked: `Blinked at ${score.toFixed(1)}s`,
     unbreakable: 'Unbreakable!',
-    synced: `In sync: ${Math.round(seconds)}%`,
+    synced: `${Math.round(score)}% in sync`,
   };
   const kickers = {
     cracked: ['Gotcha.', 'There it is.', 'The smile escaped.', 'Caught you.'],
-    blinked: ['Blink detected.', 'Eyes closed. Game over.', 'There it goes.'],
+    blinked: ['Blink spotted.', 'Eyes closed.', 'There it goes.'],
     unbreakable: ['Stone cold.', 'Not a flicker.', 'Ice in your veins.'],
-    synced: seconds >= 70 ? ['Smooth.', 'Right on the beat.'] : ['Nice and slow.', 'Breathing counts.'],
+    synced: score >= 70 ? ['Smooth.', 'Right on the beat.'] : ['Nice and slow.', 'Good effort.'],
   };
   const pick = (list) => list[Math.floor(Math.random() * list.length)];
 
-  const nextIdx = (game.turn + 1) % players.length;
-  const nextName = playerName(players[nextIdx], nextIdx);
-  overlay({
-    kicker: pick(kickers[outcome]),
-    title: titles[outcome],
-    text: isBest && prevBest !== null ? `New personal best for ${name}.` : '',
-    action: {
-      label: players.length > 1 ? `Next: ${nextName}` : 'Play again',
-      run: () => { game.turn += 1; handoff(); },
-    },
-  });
-
   // Pulse before vs after, only if the SDK had a confident reading for both.
   const pulseEnd = session.vitals.pulse?.value ?? null;
-  const pulseLine = $('result-pulse');
+  const lines = [];
+  if (outcome === 'cracked' && game.prompt) lines.push(`Broken by: “${game.prompt[1]}”`);
   if (game.pulseStart !== null && pulseEnd !== null) {
-    pulseLine.hidden = false;
-    pulseLine.textContent = `Pulse during the round: ${game.pulseStart.toFixed(0)} → ${pulseEnd.toFixed(0)} bpm`;
-  } else {
-    pulseLine.hidden = true;
+    lines.push(`Pulse ${game.pulseStart.toFixed(0)} → ${pulseEnd.toFixed(0)} bpm.`);
   }
+  if (isBest && prevBest !== null) lines.push(`New personal best for ${name}.`);
 
-  const modeLabel = MODES[game.mode].label;
+  const nextIdx = (game.turn + 1) % players.length;
+  const nextName = playerName(players[nextIdx], nextIdx);
+  const action = {
+    label: players.length > 1 ? `Next: ${nextName}` : 'Play again',
+    run: () => { game.turn += 1; handoff(); },
+  };
+
   const card = await renderCard({
     photo,
     outcome,
-    seconds,
-    scoreText: fmtScore(game.mode, seconds),
+    seconds: score,
+    scoreText: fmtScore(game.mode, score),
     player: name,
-    modeLabel,
+    modeLabel: MODES[game.mode].label,
     prompt: outcome === 'cracked' ? game.prompt : null,
   });
   revokeCard();
   game.card = card;
   game.cardUrl = await new Promise((resolve) => card.toBlob((b) => resolve(URL.createObjectURL(b)), 'image/png'));
-  $('result-card').src = game.cardUrl;
-  $('result-line').textContent = outcome === 'cracked' && game.prompt
-    ? `Broken by: ${game.prompt[0]} ${game.prompt[1]}`
-    : '';
-  $('result').hidden = false;
-  renderScoreboard();
+  if (game.phase !== 'result') return;
+  overlay({ kicker: pick(kickers[outcome]), title: titles[outcome], text: lines.join(' '), action, card: game.cardUrl });
   armIdle();
 }
 
@@ -730,7 +849,9 @@ function revokeCard() {
   if (game.cardUrl) URL.revokeObjectURL(game.cardUrl);
   game.cardUrl = null;
   game.card = null;
-  $('result-card').removeAttribute('src');
+  $('overlay-card').removeAttribute('src');
+  $('overlay-card').hidden = true;
+  $('save-card').hidden = true;
 }
 
 function saveCard() {
@@ -819,7 +940,7 @@ function onLabExpression({ happy, top, at }) {
   labReport();
 }
 
-function onLabVitals(_all, { pulse, breathing, hrv }) {
+function onLabVitals({ pulse, breathing, hrv }) {
   if (screen !== 'lab') return;
   for (const [key, v] of Object.entries({ pulse, breathing, hrv })) {
     if (!v) continue;
@@ -900,12 +1021,20 @@ function labTrial() {
 
 // ---------------------------------------------------------------- events
 
-$('go-home').addEventListener('click', goHome);
-$('leave-play').addEventListener('click', goHome);
+for (const tile of document.querySelectorAll('.game-tile')) {
+  tile.addEventListener('click', () => chooseMode(tile.dataset.mode));
+}
+$('go-home').addEventListener('click', goPick);
+$('leave-play').addEventListener('click', goPick);
+$('setup-back').addEventListener('click', () => showScreen('pick'));
+$('to-check').addEventListener('click', enterCheck);
+$('check-back').addEventListener('click', async () => { stopCheck(); await session.stop(); clearError(); showScreen('setup'); });
+$('check-retry').addEventListener('click', async () => { await session.stop(); enterCheck(); });
+$('start-game').addEventListener('click', startPlay);
 $('add-player').addEventListener('click', addPlayer);
-$('play').addEventListener('click', startPlay);
 $('save-card').addEventListener('click', saveCard);
 $('open-lab').addEventListener('click', () => { clearError(); showScreen('lab'); labRounds(); labReport(); });
+$('lab-back').addEventListener('click', goPick);
 $('lab-start').addEventListener('click', labStart);
 $('lab-stop').addEventListener('click', labStop);
 $('copy').addEventListener('click', () => {
@@ -917,7 +1046,7 @@ $('copy').addEventListener('click', () => {
 
 window.addEventListener('keydown', (event) => {
   const tag = event.target.tagName;
-  if (['INPUT', 'TEXTAREA', 'SUMMARY'].includes(tag)) return;
+  if (['INPUT', 'TEXTAREA', 'SUMMARY', 'BUTTON'].includes(tag)) return;
   if (event.code !== 'Space' || event.repeat) return;
   if (screen === 'lab') {
     event.preventDefault();
@@ -929,12 +1058,12 @@ window.addEventListener('beforeunload', () => session.destroy());
 
 // ---------------------------------------------------------------- boot
 
-players.push({ name: '', best: { straight: null, stare: null } });
+players.push(newPlayer());
 renderPlayers();
 $('no-key').hidden = Boolean(API_KEY);
-$('play').disabled = !API_KEY;
+for (const tile of document.querySelectorAll('.game-tile')) tile.disabled = !API_KEY;
 $('lab-start').disabled = !API_KEY;
-showScreen('home');
+showScreen('pick');
 // Debug builds only: lets an automated check drive the game with synthetic events.
-if (DEBUG) window.__straightFace = { session, game, players };
+if (DEBUG) window.__straightFace = { session, game, players, check };
 console.log(`straight-face ready; key ${API_KEY ? 'present' : 'missing'}`);

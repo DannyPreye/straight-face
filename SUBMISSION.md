@@ -57,7 +57,7 @@ Most Creative or Delightful Use, and Best Thoughtful Real-World Use for the Cool
 
 ## Consent and Data Handling
 
-The camera stays off until someone presses Play or Turn on camera, and the home screen explains what happens before they do. It turns off when you go back home, close the app, or leave it idle for three minutes. The SDK reads one face at a time, and every player sits down to play on purpose.
+The camera stays off until you reach the camera check step, which says what the camera is for and that nothing is recorded. It turns off when you go back home, close the app, or leave it idle for three minutes. The SDK reads one face at a time, and every player sits down to play on purpose.
 
 The app saves no video and no readings. There are no accounts and no analytics.
 

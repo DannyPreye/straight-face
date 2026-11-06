@@ -7,6 +7,14 @@ moment you smile (or blink) you're out.
 Built for the [DEV Presage SmartSpectra SDK Challenge](https://dev.to/challenges/presage-2026-11-04).
 This is a game, not a medical product. Readings are for play only.
 
+## How it flows
+
+1. **Pick a game.** Three tiles, one choice.
+2. **Players.** Names, plus how that game works in three lines.
+3. **Camera check.** A live preview and a checklist that ticks itself: connected, enough light, face in view,
+   and for Cool Down, chest in view. Start unlocks once they're green.
+4. **Play.** Take turns. Results show on the stage with a shareable card.
+
 ## Modes
 
 - **Straight Face**: a new prompt appears every 6 seconds and tries to make you smile. If the SDK's
@@ -62,8 +70,9 @@ In a VS Code terminal, clear `ELECTRON_RUN_AS_NODE` first or the app exits immed
 
 ## Privacy
 
-- The camera turns on only when you press **Play** or **Turn on camera**, and turns off when you go home
-  or close the app. After 3 idle minutes it turns off by itself.
+- The camera turns on only when you reach the **Camera check** step (or press **Turn on camera** in the
+  signal lab), and turns off when you end the game, go back, or close the app. After 3 idle minutes it turns
+  off by itself.
 - Video frames go to the SmartSpectra SDK running in the app. The SDK contacts Presage's servers to
   authenticate your key, download its models and record usage. SDK telemetry is turned off
   (`enableTelemetry: false`). See Presage's
