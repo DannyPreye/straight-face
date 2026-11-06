@@ -14,6 +14,9 @@ This is a game, not a medical product. Readings are for play only.
   seconds and you're unbreakable.
 - **Staring Contest**: the first blink the SDK detects ends your round. Last 60 seconds and you're
   unbreakable.
+- **Cool Down**: a 90-second breathing round. A guide starts at the breathing rate the SDK measured for
+  you and eases toward six breaths a minute (each breath 40% in, 60% out). Your chest waveform is drawn
+  live against it, and your score is how closely the two move together.
 
 Up to 8 players take turns in front of one camera. The scoreboard keeps each player's best time for the
 evening (it resets when you go back home).
@@ -26,6 +29,8 @@ evening (it resets when you go back home).
 | Blink detection | Ends a Staring Contest round, and the on-screen eyes blink with you |
 | Validation status | Shows framing and lighting hints; a round doesn't count if your face is lost for 1.5 seconds |
 | Pulse rate | Shown in the top bar once the SDK is confident, and as "before → after" on the result |
+| Breathing rate | Sets where the Cool Down guide starts |
+| Breathing waveform (upper chest) | Drawn live against the guide; the sync score compares the two |
 
 The **Signal lab** screen shows every reading live, how long each takes to warm up, and a reaction
 test that times how quickly a smile registers.
@@ -50,7 +55,8 @@ In a VS Code terminal, clear `ELECTRON_RUN_AS_NODE` first or the app exits immed
 
 - **Light your face from the front.** The app measures brightness before it starts and won't run in a
   dark room.
-- **One face in frame,** facing the camera.
+- **One face in frame,** facing the camera. For Cool Down, sit back so your upper chest is in view and keep
+  the laptop on a table: breathing is read from chest movement.
 - **A steady connection.** The SDK talks to Presage's servers during a session. If the connection drops,
   the app reconnects up to twice and doesn't count the interrupted round.
 
@@ -76,8 +82,16 @@ In a VS Code terminal, clear `ELECTRON_RUN_AS_NODE` first or the app exits immed
 | `src/app.js` | Screens, game rounds, scoreboard, Signal lab |
 | `src/decks.js` | Prompt packs (original writing) |
 | `src/card.js` | Result card rendering |
+| `src/cooldown.js` | Breathing guide, waveform drawing and sync score |
 | `build.mjs` | Bundles the renderer and injects the API key from `.env` |
 
 ## License
 
 MIT for this project's code. The SmartSpectra SDK is proprietary to Presage and is used under [its own terms](https://physiology.presagetech.com/tos).
+
+### How the sync score works
+
+Every second, the app takes the last 15 seconds of the guide and of your measured chest movement, resamples both to
+10 Hz and computes their correlation, letting your breath trail the guide by up to 3 seconds (the SDK's waveform
+arrives a little after the movement). The best match becomes that second's sync, and the round score is the average.
+Breathing at your own pace while ignoring the guide scores low; following it scores high.

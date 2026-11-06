@@ -1,6 +1,6 @@
 'use strict';
 
-// One SmartSpectra session shared by every screen. It owns the camera, runs
+// One SmartSpectra session for the whole app. It owns the camera, runs
 // a lighting check before the SDK starts, and turns raw metrics into simple
 // events the game can react to. Nothing here stores or sends readings.
 
@@ -288,6 +288,15 @@ class Session extends EventTarget {
         this.happy = scores.find((s) => s.name === 'happy')?.value ?? this.happy;
         this.emit('expression', { happy: this.happy, top: this.top, at: performance.now() });
       }
+    }
+
+    // Chest-movement waveform. Each event carries only the samples since the
+    // last one, so listeners append. Timestamps are microseconds since epoch.
+    const trace = metrics.breathing?.upperTrace ?? [];
+    if (trace.length) {
+      this.emit('breathTrace', {
+        points: trace.map((m) => ({ t: tsToNumber(m.timestamp) / 1e6, v: m.value })),
+      });
     }
 
     const pick = (sample) => (sample && (sample.confidence ?? 0) > 0

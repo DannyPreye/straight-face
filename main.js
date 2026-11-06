@@ -14,6 +14,9 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      // Rounds are timed and animated; keep them running when the window is
+      // covered (for example while a screen recorder has focus).
+      backgroundThrottling: false,
     },
   });
 

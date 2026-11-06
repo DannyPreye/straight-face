@@ -68,13 +68,13 @@ function drawCover(ctx, src, x, y, w, h) {
 /**
  * @param {object} o
  * @param {HTMLCanvasElement|null} o.photo
- * @param {'cracked'|'blinked'|'unbreakable'} o.outcome
+ * @param {'cracked'|'blinked'|'unbreakable'|'synced'} o.outcome
  * @param {number} o.seconds
  * @param {string} o.player
  * @param {string} o.modeLabel
  * @param {[string, string]|null} o.prompt  emoji + text that was on screen
  */
-async function renderCard({ photo, outcome, seconds, player, modeLabel, prompt }) {
+async function renderCard({ photo, outcome, seconds, scoreText, player, modeLabel, prompt }) {
   await Promise.all([
     document.fonts.load('800 80px "Bricolage Grotesque Variable"'),
     document.fonts.load('600 30px "Inter Variable"'),
@@ -91,7 +91,7 @@ async function renderCard({ photo, outcome, seconds, player, modeLabel, prompt }
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
-  const accent = outcome === 'unbreakable' ? COLORS.mint : outcome === 'blinked' ? COLORS.sun : COLORS.coral;
+  const accent = { unbreakable: COLORS.mint, synced: COLORS.mint, blinked: COLORS.sun }[outcome] ?? COLORS.coral;
 
   // Photo, or a big face if the player kept photos off.
   const px = 70;
@@ -115,7 +115,7 @@ async function renderCard({ photo, outcome, seconds, player, modeLabel, prompt }
   ctx.stroke();
 
   // Stamp.
-  const stamp = { cracked: 'CRACKED', blinked: 'BLINKED', unbreakable: 'UNBREAKABLE' }[outcome];
+  const stamp = { cracked: 'CRACKED', blinked: 'BLINKED', unbreakable: 'UNBREAKABLE', synced: 'IN SYNC' }[outcome];
   ctx.save();
   ctx.translate(W - 250, py + 110);
   ctx.rotate(-0.12);
@@ -135,7 +135,7 @@ async function renderCard({ photo, outcome, seconds, player, modeLabel, prompt }
   ctx.textAlign = 'left';
   ctx.fillStyle = COLORS.ink;
   ctx.font = '800 150px "Bricolage Grotesque Variable", sans-serif';
-  ctx.fillText(`${seconds.toFixed(1)}s`, 70, 1000);
+  ctx.fillText(scoreText ?? `${seconds.toFixed(1)}s`, 70, 1000);
 
   ctx.font = '700 44px "Bricolage Grotesque Variable", sans-serif';
   ctx.fillStyle = accent;

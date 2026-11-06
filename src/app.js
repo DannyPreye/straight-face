@@ -3,6 +3,7 @@
 const { Session } = require('./session');
 const { makeDeck, makeTauntDeck } = require('./decks');
 const { renderCard } = require('./card');
+const { createPacer, syncScore, drawWave, WAVE_WINDOW_S } = require('./cooldown');
 
 // Injected by build.mjs from .env.
 const API_KEY = __PRESAGE_API_KEY__;
@@ -22,7 +23,15 @@ const IDLE_STOP_MS = 3 * 60 * 1000;
 const MODES = {
   straight: { label: 'Straight Face', limit: 45, lose: 'cracked' },
   stare: { label: 'Staring Contest', limit: 60, lose: 'blinked' },
+  cool: { label: 'Cool Down', limit: 90, lose: null },
 };
+const SYNC_EVERY_MS = 1000;
+const SYNC_GRACE_S = 15;        // sync needs 15 s of guide + breath to measure
+
+// Cool Down scores are sync percentages; the other modes are seconds.
+function fmtScore(mode, v) {
+  return mode === 'cool' ? `${Math.round(v)}%` : `${v.toFixed(1)}s`;
+}
 const MAX_PLAYERS = 8;
 const EMOJI = { angry: '😠', contempt: '😏', disgust: '🤢', fear: '😨', happy: '😄', neutral: '😐', sad: '😢', surprise: '😮' };
 
@@ -97,6 +106,19 @@ session.addEventListener('expression', ({ detail }) => {
   onLabExpression(detail);
 });
 
+session.addEventListener('breathTrace', ({ detail }) => {
+  const pts = detail.points;
+  if (!pts.length) return;
+  const nowS = performance.now() / 1000;
+  // Map SDK timestamps onto our clock; re-anchor after a gap (reconnect).
+  if (game.traceShift === null || nowS - game.lastTraceAt > 3) {
+    game.traceShift = nowS - pts[pts.length - 1].t;
+  }
+  game.lastTraceAt = nowS;
+  for (const p of pts) game.trace.push({ t: p.t + game.traceShift, v: p.v });
+  while (game.trace.length && game.trace[0].t < nowS - WAVE_WINDOW_S - 5) game.trace.shift();
+});
+
 session.addEventListener('blink', ({ detail }) => {
   onGameBlink(detail);
   $('lab-blinks').textContent = String(detail.count);
@@ -156,6 +178,8 @@ session.addEventListener('recovered', () => {
 });
 
 session.addEventListener('stopped', () => {
+  game.trace = [];
+  game.traceShift = null;
   $('heart-pill').hidden = true;
   $('hud-heart').dataset.beating = 'false';
   $('viewfinder').dataset.live = 'false';
@@ -256,6 +280,14 @@ const game = {
   photo: false,
   card: null,
   cardUrl: null,
+  // Cool Down: guide + measured chest waveform, both on performance.now()/1000.
+  trace: [],
+  traceShift: null,
+  lastTraceAt: 0,
+  guide: [],
+  syncs: [],
+  pacer: null,
+  breathIn: null,
 };
 let idleHandle = 0;
 
@@ -305,7 +337,7 @@ function renderScoreboard() {
     name.textContent = row.name;
     const score = document.createElement('span');
     score.className = 'score';
-    score.textContent = row.best === null ? '—' : `${row.best.toFixed(1)}s`;
+    score.textContent = row.best === null ? '—' : fmtScore(game.mode, row.best);
     li.append(name, score);
     list.append(li);
   }
@@ -321,8 +353,10 @@ async function startPlay() {
   game.taunts = makeTauntDeck();
   game.photo = $('photo-opt').checked;
   game.turn = 0;
-  for (const p of players) p.best = { straight: null, stare: null };
+  for (const p of players) p.best = { straight: null, stare: null, cool: null };
 
+  $('meter-panel').hidden = game.mode === 'cool';
+  $('calm-panel').hidden = game.mode !== 'cool';
   $('meter-title').textContent = game.mode === 'stare' ? 'Eyes' : 'Crack-o-meter';
   $('meter').hidden = game.mode === 'stare';
   document.querySelector('.meter-scale').hidden = game.mode === 'stare';
@@ -340,13 +374,18 @@ function handoff() {
   $('prompt-card').hidden = true;
   renderScoreboard();
   const name = playerName(current(), game.turn % players.length);
-  const rules = game.mode === 'stare'
-    ? 'Keep your eyes open. The first blink ends your round.'
-    : 'Prompts will try to make you smile. Keep the Crack-o-meter out of the red.';
+  const rules = {
+    stare: 'Keep your eyes open. The first blink ends your round.',
+    straight: 'Prompts will try to make you smile. Keep the Crack-o-meter out of the red.',
+    cool: 'Breathe with the guide for 90 seconds. It starts at your own pace and slows down. Your score is how closely your breath follows it.',
+  }[game.mode];
+  const framing = game.mode === 'cool'
+    ? 'Keep the laptop on a table and sit back so your face and upper chest are in view.'
+    : 'Sit facing the camera with light on your face.';
   overlay({
     kicker: players.length > 1 ? 'Pass the laptop to' : 'Ready?',
     title: name,
-    text: `${rules} Sit facing the camera with light on your face.`,
+    text: `${rules} ${framing}`,
     action: { label: session.running ? 'Start round' : 'Turn on camera and start', run: beginRound },
   });
   armIdle();
@@ -385,15 +424,19 @@ function settle() {
   game.settleSince = 0;
   game.phaseSince = performance.now();
   overlay({
-    kicker: 'Get your game face on',
-    title: game.mode === 'stare' ? 'Look at the camera' : 'Neutral face, please',
-    text: 'The round starts once we can see you clearly.',
+    kicker: game.mode === 'cool' ? 'Get comfortable' : 'Get your game face on',
+    title: { stare: 'Look at the camera', straight: 'Neutral face, please', cool: 'Just breathe for a moment' }[game.mode],
+    text: game.mode === 'cool'
+      ? 'The round starts once we can see your breathing.'
+      : 'The round starts once we can see you clearly.',
   });
   const check = () => {
     if (game.phase !== 'settle') return;
     const now = performance.now();
     const faceOk = session.top && !game.faceLost;
-    const calm = game.mode === 'stare' || (session.happy ?? 100) < WOBBLE_LEVEL;
+    const breathing = game.trace.length > 0 && now / 1000 - game.lastTraceAt < 2;
+    const calm = game.mode === 'stare'
+      || (game.mode === 'cool' ? breathing : (session.happy ?? 100) < WOBBLE_LEVEL);
     if (faceOk && calm) {
       if (!game.settleSince) game.settleSince = now;
       if (now - game.settleSince >= SETTLE_MS) {
@@ -407,7 +450,9 @@ function settle() {
       const hint = $('validation').textContent;
       $('overlay-text').textContent = !session.top
         ? `We can’t read your face yet. ${hint ? `The camera says: “${hint}”` : 'Check your light and framing.'}`
-        : 'Relax your face. Think about tax forms.';
+        : game.mode === 'cool'
+          ? 'We can’t see your breathing yet. Sit back so your upper chest is in view, and keep the laptop still.'
+          : 'Relax your face. Think about tax forms.';
     }
     game.raf = requestAnimationFrame(check);
   };
@@ -424,7 +469,7 @@ function countdown() {
       goLive();
       return;
     }
-    overlay({ kicker: game.mode === 'stare' ? 'Eyes open' : 'Straight face', title: String(n), text: '' });
+    overlay({ kicker: { stare: 'Eyes open', straight: 'Straight face', cool: 'Follow the guide' }[game.mode], title: String(n), text: '' });
     $('overlay').dataset.count = 'true';
     n -= 1;
     later(tick, 800);
@@ -453,6 +498,11 @@ function goLive() {
     void card.offsetWidth;
     card.dataset.anim = 'true';
   };
+  const limit = MODES[game.mode].limit;
+  if (game.mode === 'cool') {
+    startCoolDown(limit);
+    return;
+  }
   if (game.mode === 'stare') {
     game.prompt = null;
     $('prompt-card').hidden = true;
@@ -462,7 +512,6 @@ function goLive() {
     game.timers.push(setInterval(nextPrompt, PROMPT_EVERY_MS));
   }
 
-  const limit = MODES[game.mode].limit;
   const frame = () => {
     if (game.phase !== 'live') return;
     const t = (performance.now() - game.startedAt) / 1000;
@@ -473,6 +522,66 @@ function goLive() {
     }
     if (t >= limit) {
       endRound('unbreakable');
+      return;
+    }
+    game.raf = requestAnimationFrame(frame);
+  };
+  game.raf = requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- cool down
+
+function startCoolDown(limit) {
+  const measured = session.vitals.breathing?.value ?? null;
+  const pacer = createPacer(measured, limit);
+  game.pacer = pacer;
+  game.guide = [];
+  game.syncs = [];
+  game.breathIn = null;
+  game.prompt = null;
+  $('pacer').hidden = false;
+  $('cue-sub').textContent = measured === null
+    ? `Your breathing reading wasn’t ready yet, so the guide starts at ${pacer.start} a minute.`
+    : `Starting at your own pace: ${pacer.start.toFixed(0)} breaths a minute.`;
+  $('sync-value').textContent = 'Measuring…';
+
+  let last = performance.now();
+  let lastSync = 0;
+  const frame = () => {
+    if (game.phase !== 'live') return;
+    const nowMs = performance.now();
+    const t = (nowMs - game.startedAt) / 1000;
+    const dt = Math.min(0.1, (nowMs - last) / 1000);
+    last = nowMs;
+    const step = pacer.step(t, dt);
+    $('pacer').style.setProperty('--s', (0.3 + 0.7 * step.level).toFixed(3));
+    if (step.inhaling !== game.breathIn) {
+      game.breathIn = step.inhaling;
+      $('cue').textContent = step.inhaling ? 'Breathe in' : 'Breathe out';
+    }
+    if (t > 8) $('cue-sub').textContent = String(Math.ceil(step.leftInPhase));
+    $('hud-timer').textContent = Math.max(0, limit - t).toFixed(0);
+    $('guide-pace').textContent = `${pacer.rate.toFixed(1)} /min`;
+
+    const nowS = nowMs / 1000;
+    game.guide.push({ t: nowS, v: step.level });
+    while (game.guide.length && game.guide[0].t < nowS - WAVE_WINDOW_S - 5) game.guide.shift();
+    drawWave($('calm-wave'), game.guide, game.trace, nowS);
+
+    if (t >= SYNC_GRACE_S && nowMs - lastSync >= SYNC_EVERY_MS) {
+      lastSync = nowMs;
+      const s = syncScore(game.guide, game.trace, nowS);
+      if (s !== null) {
+        game.syncs.push(s);
+        $('sync-value').textContent = `${s}%`;
+      }
+    }
+    if (game.faceLostSince && nowMs - game.faceLostSince > FACE_LOST_VOID_MS) {
+      endRound('void');
+      return;
+    }
+    if (t >= limit) {
+      endRound('synced');
       return;
     }
     game.raf = requestAnimationFrame(frame);
@@ -499,14 +608,28 @@ function onGameBlink({ at }) {
 // outcome: null (leaving), 'error', 'void', or a scored result
 // ('cracked' | 'blinked' | 'unbreakable'), which only counts while live.
 function endRound(outcome) {
-  const scored = outcome === 'cracked' || outcome === 'blinked' || outcome === 'unbreakable';
-  if ((scored || outcome === 'void') && game.phase !== 'live') return;
+  if (outcome === 'synced' && !game.syncs.length) outcome = 'nobreath';
+  const scored = ['cracked', 'blinked', 'unbreakable', 'synced'].includes(outcome);
+  if ((scored || outcome === 'void' || outcome === 'nobreath') && game.phase !== 'live') return;
 
-  const seconds = scored ? Math.min(MODES[game.mode].limit, (performance.now() - game.startedAt) / 1000) : 0;
+  const seconds = outcome === 'synced'
+    ? game.syncs.reduce((s, v) => s + v, 0) / game.syncs.length
+    : scored ? Math.min(MODES[game.mode].limit, (performance.now() - game.startedAt) / 1000) : 0;
   const photo = scored && game.photo ? session.snapshot() : null;
   clearTimers();
   $('prompt-card').hidden = true;
   $('hud-top').hidden = true;
+  $('pacer').hidden = true;
+  if (outcome === 'nobreath') {
+    game.phase = 'result';
+    overlay({
+      kicker: 'Round doesn’t count',
+      title: 'We couldn’t see your breathing',
+      text: 'Keep the laptop still on a table and sit back so your upper chest is in view.',
+      action: { label: 'Try again', run: beginRound },
+    });
+    return;
+  }
 
   if (outcome === null) {
     game.phase = 'idle';
@@ -549,11 +672,13 @@ async function showResult(outcome, seconds, photo) {
     cracked: `Cracked at ${seconds.toFixed(1)}s`,
     blinked: `Blinked at ${seconds.toFixed(1)}s`,
     unbreakable: 'Unbreakable!',
+    synced: `In sync: ${Math.round(seconds)}%`,
   };
   const kickers = {
     cracked: ['Gotcha.', 'There it is.', 'The smile escaped.', 'Caught you.'],
     blinked: ['Blink detected.', 'Eyes closed. Game over.', 'There it goes.'],
     unbreakable: ['Stone cold.', 'Not a flicker.', 'Ice in your veins.'],
+    synced: seconds >= 70 ? ['Smooth.', 'Right on the beat.'] : ['Nice and slow.', 'Breathing counts.'],
   };
   const pick = (list) => list[Math.floor(Math.random() * list.length)];
 
@@ -584,6 +709,7 @@ async function showResult(outcome, seconds, photo) {
     photo,
     outcome,
     seconds,
+    scoreText: fmtScore(game.mode, seconds),
     player: name,
     modeLabel,
     prompt: outcome === 'cracked' ? game.prompt : null,
