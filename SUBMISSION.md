@@ -39,7 +39,7 @@ There are two prompt packs. One is general silliness. The other is Naija: NEPA t
 | Breathing rate | Sets where the Cool Down guide starts. |
 | Breathing waveform | Drawn live against the guide. Every second I correlate the last 15 seconds of both (allowing your breath to trail by up to 3 seconds), and the round score is the average. |
 
-It's an Electron app on `@smartspectra/node-sdk`. The window captures the camera and the SDK runs in the main process. I wrapped the SDK in a single session object that turns its metrics into plain events (expression, blink, vitals), and both game modes and a Signal lab screen listen to those. The Signal lab shows every reading live, how long each one takes to warm up, and a reaction test that times how fast a smile registers.
+It's an Electron app on `@smartspectra/node-sdk`. The window captures the camera and the SDK runs in the main process. I wrapped the SDK in a single session object that turns its metrics into plain events (expression, blink, breathing waveform, vitals), and all three modes and a Signal lab screen listen to those. The Signal lab shows every reading live, how long each one takes to warm up, and a reaction test that times how fast a smile registers.
 
 <!-- TODO after playtesting: add real numbers from the Signal lab (median smile lag, expression updates per second) and what you tuned because of them. -->
 
